@@ -154,6 +154,90 @@ validate_input() {
 # ─────────────────────────────────────────────────────────────────────────────
 #  DEPENDENCY & SYSTEM CHECKS
 # ─────────────────────────────────────────────────────────────────────────────
+# Detect Ubuntu release codename and choose correct libfuse3 package
+get_fuse3_package() {
+    local codename
+    codename=$(. /etc/os-release 2>/dev/null && echo "$VERSION_CODENAME") || codename=""
+
+    case "$codename" in
+        resolute|questing|stonking)  # Ubuntu 26.04+
+            echo "libfuse3-4"
+            ;;
+        *)                           # Ubuntu 20.04–25.10, Debian, etc.
+            echo "libfuse3-3"
+            ;;
+    esac
+}
+
+install_system_packages() {
+    print_status "INFO" "🔧 Checking and installing system dependencies..."
+
+    local has_sudo=false
+    if command -v sudo &>/dev/null; then
+        has_sudo=true
+    elif [ "$(id -u)" -eq 0 ]; then
+        has_sudo=true
+    fi
+
+    local install_cmd=""
+    if [ "$has_sudo" = true ]; then
+        if [ "$(id -u)" -eq 0 ]; then
+            install_cmd="apt-get install -y"
+        else
+            install_cmd="sudo apt-get install -y"
+        fi
+    fi
+
+    # Core packages always needed
+    local core_pkgs="qemu-system cloud-image-utils wget lsof openssl"
+
+    if [ -z "$install_cmd" ]; then
+        print_status "WARN" "⚠️  No sudo/root access — cannot auto-install packages."
+        print_status "INFO"  "💡 Run: sudo apt update && sudo apt install qemu-system cloud-image-utils wget lsof openssl"
+        return 1
+    fi
+
+    # Update package lists
+    print_status "INFO" "📦 Updating package lists..."
+    $install_cmd update 2>&1 | tail -2
+
+    # Install core packages
+    print_status "INFO" "📦 Installing core dependencies (qemu-system, cloud-image-utils, wget, lsof, openssl)..."
+    $install_cmd --no-install-recommends $core_pkgs 2>&1 | tail -5
+
+    # Install the correct libfuse3 package for this Ubuntu version
+    print_status "INFO" "📦 Installing libfuse3.so.3..."
+    local fuse3_pkg
+    fuse3_pkg=$(get_fuse3_package)
+    print_status "INFO" "📦 Detected fuse package: $fuse3_pkg"
+
+    $install_cmd --no-install-recommends "$fuse3_pkg" 2>&1 | tail -3
+
+    # If that failed, try fallback package names
+    if ! ldconfig -p 2>/dev/null | grep -q libfuse3.so.3; then
+        print_status "WARN" "⚠️  $fuse3_pkg didn't provide libfuse3.so.3 — trying fallbacks..."
+        for fallback in libfuse3-3 libfuse3-4 fuse3 libfuse2 libfuse2t64; do
+            [[ "$fallback" == "$fuse3_pkg" ]] && continue
+            $install_cmd --no-install-recommends "$fallback" 2>&1 | tail -2
+            if ldconfig -p 2>/dev/null | grep -q libfuse3.so.3; then
+                print_status "SUCCESS" "✅ libfuse3.so.3 installed via $fallback"
+                break
+            fi
+        done
+    fi
+
+    # Refresh linker cache
+    ldconfig 2>/dev/null || true
+
+    # Final verification
+    if ! ldconfig -p 2>/dev/null | grep -q libfuse3.so.3; then
+        print_status "WARN" "⚠️  libfuse3.so.3 still not found after install attempts."
+        print_status "INFO"  "💡 Try: sudo apt install libfuse3-4 (Ubuntu 26.04) or libfuse3-3 (Ubuntu 20.04–25.04)"
+    else
+        print_status "SUCCESS" "✅ libfuse3.so.3 is available"
+    fi
+}
+
 check_dependencies() {
     local deps=("qemu-system-x86_64" "wget" "qemu-img" "lsof")
     local missing=()
@@ -167,15 +251,27 @@ check_dependencies() {
     # cloud-localds is optional — we provide a manual fallback
     if ! command -v cloud-localds &>/dev/null; then
         print_status "WARN" "📦 'cloud-localds' not found; will use manual ISO creation as fallback."
-    else
-        deps+=("cloud-localds")
+    fi
+
+    # Also check libfuse3 shared library
+    if ! ldconfig -p 2>/dev/null | grep -q libfuse3.so.3; then
+        print_status "WARN" "📦 libfuse3.so.3 not found — QEMU may fail. Installing dependencies..."
+        install_system_packages
     fi
 
     if [ "${#missing[@]}" -ne 0 ]; then
-        print_status "ERROR" "🔧 Missing dependencies: ${missing[*]}"
-        print_status "INFO"  "💡 On Ubuntu/Debian try: sudo apt install qemu-system cloud-image-utils wget lsof"
-        log ERROR "Missing dependencies: ${missing[*]}"
-        exit 1
+        print_status "WARN" "⚠️  Still missing: ${missing[*]} — attempting install..."
+        install_system_packages
+
+        # Re-check after install
+        for dep in "${missing[@]}"; do
+            if ! command -v "$dep" &>/dev/null; then
+                print_status "ERROR" "🔧 Still missing after install: $dep"
+                print_status "INFO"  "💡 Manual fix: sudo apt install qemu-system libfuse3 cloud-image-utils wget lsof"
+                log ERROR "Missing dependencies after install: ${missing[*]}"
+                exit 1
+            fi
+        done
     fi
 }
 
