@@ -55,6 +55,80 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---------------------------------------------------------------------------
+# Package manager detection + auto-install
+# ---------------------------------------------------------------------------
+detect_pkg_manager() {
+    if command -v apt-get &>/dev/null; then
+        echo "apt"
+    elif command -v dnf &>/dev/null; then
+        echo "dnf"
+    elif command -v yum &>/dev/null; then
+        echo "yum"
+    elif command -v pacman &>/dev/null; then
+        echo "pacman"
+    elif command -v zypper &>/dev/null; then
+        echo "zypper"
+    else
+        echo "unknown"
+    fi
+}
+
+# Maps our required binaries to the actual package names per distro family.
+install_missing_dependencies() {
+    local pkg_mgr=$1
+    local install_cmd=()
+
+    case "$pkg_mgr" in
+        apt)
+            install_cmd=(sudo apt-get update -y '&&' sudo apt-get install -y qemu-system-x86 cloud-image-utils)
+            ;;
+        dnf)
+            install_cmd=(sudo dnf install -y qemu-system-x86 cloud-utils)
+            ;;
+        yum)
+            install_cmd=(sudo yum install -y qemu-kvm cloud-utils)
+            ;;
+        pacman)
+            install_cmd=(sudo pacman -Sy --noconfirm qemu-full cloud-image-utils)
+            ;;
+        zypper)
+            install_cmd=(sudo zypper install -y qemu-x86 cloud-init)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    print_status "INFO" "Detected package manager: $pkg_mgr"
+    print_status "INFO" "The following command will be run to install missing dependencies:"
+    echo "    ${install_cmd[*]}"
+    read -rp "$(print_status "INPUT" "Proceed with installation? (y/N): ")" confirm_install
+
+    if [[ ! "$confirm_install" =~ ^[Yy]$ ]]; then
+        print_status "INFO" "Installation skipped by user."
+        return 1
+    fi
+
+    case "$pkg_mgr" in
+        apt)
+            sudo apt-get update -y && sudo apt-get install -y qemu-system-x86 cloud-image-utils
+            ;;
+        dnf)
+            sudo dnf install -y qemu-system-x86 cloud-utils
+            ;;
+        yum)
+            sudo yum install -y qemu-kvm cloud-utils
+            ;;
+        pacman)
+            sudo pacman -Sy --noconfirm qemu-full cloud-image-utils
+            ;;
+        zypper)
+            sudo zypper install -y qemu-x86 cloud-init
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Dependency check
 # ---------------------------------------------------------------------------
 check_dependencies() {
@@ -70,9 +144,38 @@ check_dependencies() {
 
     if [[ ${#missing[@]} -ne 0 ]]; then
         print_status "ERROR" "Missing required dependencies: ${missing[*]}"
-        print_status "INFO"  "On Ubuntu/Debian: sudo apt install qemu-system-x86 cloud-image-utils"
-        print_status "INFO"  "On Fedora/RHEL:   sudo dnf install qemu-system-x86 cloud-utils"
-        exit 1
+
+        local pkg_mgr
+        pkg_mgr=$(detect_pkg_manager)
+
+        if [[ "$pkg_mgr" != "unknown" ]]; then
+            if install_missing_dependencies "$pkg_mgr"; then
+                # Re-check after attempted install
+                missing=()
+                for dep in "${deps[@]}"; do
+                    if ! command -v "$dep" &>/dev/null; then
+                        missing+=("$dep")
+                    fi
+                done
+                if [[ ${#missing[@]} -eq 0 ]]; then
+                    print_status "SUCCESS" "All required dependencies are now installed."
+                else
+                    print_status "ERROR" "Still missing after install attempt: ${missing[*]}"
+                    exit 1
+                fi
+            else
+                print_status "INFO"  "Manual install — Ubuntu/Debian: sudo apt install qemu-system-x86 cloud-image-utils"
+                print_status "INFO"  "Manual install — Fedora/RHEL:   sudo dnf install qemu-system-x86 cloud-utils"
+                print_status "INFO"  "Manual install — Arch:          sudo pacman -S qemu-full cloud-image-utils"
+                exit 1
+            fi
+        else
+            print_status "WARN"  "Could not detect a supported package manager (apt/dnf/yum/pacman/zypper)."
+            print_status "INFO"  "On Ubuntu/Debian: sudo apt install qemu-system-x86 cloud-image-utils"
+            print_status "INFO"  "On Fedora/RHEL:   sudo dnf install qemu-system-x86 cloud-utils"
+            print_status "INFO"  "On Arch:          sudo pacman -S qemu-full cloud-image-utils"
+            exit 1
+        fi
     fi
 
     # Optional: warn but don't exit
@@ -93,6 +196,7 @@ check_dependencies() {
     fi
     export DOWNLOADER
 }
+
 
 # ---------------------------------------------------------------------------
 # KVM detection
