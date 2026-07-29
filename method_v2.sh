@@ -201,10 +201,48 @@ check_docker() {
     # Check if Docker daemon is running
     if ! docker info &>/dev/null 2>&1; then
         print_status "WARN" "⚠️  Docker daemon is not running. Attempting to start..."
-        sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || true
+
+        # Method 1: systemctl
+        sudo systemctl start docker 2>/dev/null && print_status "INFO" "📋 Started via systemctl" && sleep 2 && true
+
+        # Method 2: service command
+        if ! docker info &>/dev/null 2>&1; then
+            sudo service docker start 2>/dev/null && print_status "INFO" "📋 Started via service" && sleep 2 && true
+        fi
+
+        # Method 3: dockerd in background (for containers/no-systemd)
+        if ! docker info &>/dev/null 2>&1; then
+            print_status "INFO" "📋 Trying dockerd directly..."
+            sudo nohup dockerd --storage-driver=overlay2 &>/tmp/dockerd.log &
+            DOCKERD_PID=$!
+            sleep 5
+            if ! docker info &>/dev/null 2>&1; then
+                sleep 5
+            fi
+            if docker info &>/dev/null 2>&1; then
+                print_status "INFO" "📋 dockerd started (PID: $DOCKERD_PID)"
+            else
+                # Method 4: try without overlay2
+                sudo nohup dockerd --storage-driver=vfs &>/tmp/dockerd-vfs.log &
+                sleep 8
+            fi
+        fi
+
+        # Final check
         if ! docker info &>/dev/null 2>&1; then
             print_status "ERROR" "❌ Docker daemon failed to start."
-            print_status "INFO"  "💡 Try: sudo systemctl start docker"
+            print_status "INFO"  "💡 Possible causes:"
+            print_status "INFO"  "   1. Running inside a container without privileged mode"
+            print_status "INFO"  "   2. No root/sudo access"
+            print_status "INFO"  "   3. Docker is already running but socket is broken"
+            echo
+            print_status "INFO"  "💡 Try these commands manually:"
+            print_status "INFO"  "   sudo dockerd &"
+            print_status "INFO"  "   sudo systemctl start docker"
+            print_status "INFO"  "   sudo service docker start"
+            echo
+            print_status "INFO"  "📋 Checking Docker logs:"
+            sudo cat /tmp/dockerd.log 2>/dev/null | tail -5 || true
             exit 1
         fi
     fi
