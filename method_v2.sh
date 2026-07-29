@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Enhanced Multi-VM Manager — v5.0 (Docker Edition)
-# Lightweight VM manager using Docker — no daemon, no root needed.
+# Enhanced Multi-VM Manager — v5.0 (Podman Edition)
+# Lightweight VM manager using Podman — no daemon, no root needed.
 #
 # Changelog v5.0:
-#   - Replaced kvmtool with Docker — runs as user, no daemon
-#   - Auto-installs ALL dependencies (docker, openssh, debootstrap, etc.)
+#   - Replaced kvmtool with Podman — runs as user, no daemon
+#   - Auto-installs ALL dependencies (podman, openssh, debootstrap, etc.)
 #   - Multi-OS support: Ubuntu, Debian, Alpine, CentOS, Fedora, Arch
 #   - SSH access, snapshots, clone, backup, autostart
 #   - Works on ANY Linux (no KVM required, no root required)
@@ -22,7 +22,7 @@ readonly LOG_FILE="${VM_LOG_FILE:-$HOME/vms-manager.log}"
 VM_DIR="${VM_DIR:-$HOME/vms}"
 DATA_DIR="${DATA_DIR:-$HOME/.vms-data}"
 # Mude o registro aqui (ex: quay.io, ghcr.io, etc.)
-REGISTRY_URL="${REGISTRY_URL:-docker.io}"
+REGISTRY_URL="${REGISTRY_URL:-podman.io}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  BANNER
@@ -55,7 +55,7 @@ log() {
 display_header() {
     clear
     echo "$BANNER"
-    echo "   Enhanced Multi-VM Manager  v${SCRIPT_VERSION} (Docker Edition)"
+    echo "   Enhanced Multi-VM Manager  v${SCRIPT_VERSION} (Podman Edition)"
     echo "   $(date '+%Y-%m-%d %H:%M:%S')  |  VM_DIR=${VM_DIR}"
     echo
 }
@@ -153,6 +153,12 @@ pkg_install() {
 }
 
 install_all_dependencies() {
+    # Check if we are in a restricted environment (like CoCalc)
+    if [ -d "/home/user" ] && [ "$USER" != "root" ]; then
+        print_status "INFO" "🛡️  Restricted environment detected. Skipping system package installation."
+        return 0
+    fi
+
     print_status "INFO" "🔧 Installing ALL dependencies automatically..."
 
     local pm
@@ -160,53 +166,38 @@ install_all_dependencies() {
 
     # Update package lists
     case "$pm" in
-        apt)    sudo apt-get update -qq 2>/dev/null ;;
-        dnf)    sudo dnf makecache -q 2>/dev/null ;;
-        yum)    sudo yum makecache -q 2>/dev/null ;;
-        pacman) sudo pacman -Sy 2>/dev/null ;;
-        apk)    sudo apk update 2>/dev/null ;;
+        apt)    sudo apt-get update -qq 2>/dev/null || true ;;
+        dnf)    sudo dnf makecache -q 2>/dev/null || true ;;
+        yum)    sudo yum makecache -q 2>/dev/null || true ;;
+        pacman) sudo pacman -Sy 2>/dev/null || true ;;
+        apk)    sudo apk update 2>/dev/null || true ;;
     esac
 
-    # ── Install Docker ──
-    if ! command -v docker &>/dev/null; then
-        print_status "INFO" "📦 Installing Docker..."
+    # ── Install Podman ──
+    if ! command -v podman &>/dev/null; then
+        print_status "INFO" "📦 Installing Podman..."
         case "$pm" in
             apt)
-                sudo apt-get install -y -qq docker.io 2>/dev/null || true
+                sudo apt-get install -y -qq podman 2>/dev/null || true
                 ;;
             dnf|yum)
-                sudo $pm install -y -q docker 2>/dev/null || true
+                sudo $pm install -y -q podman 2>/dev/null || true
                 ;;
             pacman)
-                sudo pacman -S --noconfirm docker 2>/dev/null || true
+                sudo pacman -S --noconfirm podman 2>/dev/null || true
                 ;;
             apk)
-                sudo apk add docker 2>/dev/null || true
+                sudo apk add podman 2>/dev/null || true
                 ;;
         esac
     fi
 
-    if ! command -v docker &>/dev/null; then
-        # Last resort: try snap
-        print_status "INFO" "📦 Trying snap install..."
-        sudo apt-get install -y -qq snapd 2>/dev/null || true
-        sudo snap install docker 2>/dev/null || true
-    fi
-
-    if ! command -v docker &>/dev/null; then
-        print_status "INFO" "📦 Installing Docker via official script..."
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sudo sh get-docker.sh &>/dev/null || true
-        rm get-docker.sh
-    fi
-
-    if ! command -v docker &>/dev/null; then
-        print_status "ERROR" "❌ Failed to install Docker"
-        print_status "INFO"  "💡 Try manually: sudo apt install docker"
+    if ! command -v podman &>/dev/null; then
+        print_status "ERROR" "❌ Podman not found. Please ask your administrator to install it."
         exit 1
     fi
 
-    print_status "SUCCESS" "✅ Docker installed: $(docker --version 2>/dev/null | head -1)"
+    print_status "SUCCESS" "✅ Podman installed: $(podman --version 2>/dev/null | head -1)"
 
     # ── Install SSH client ──
     if ! command -v ssh &>/dev/null; then
@@ -222,30 +213,62 @@ install_all_dependencies() {
         fi
     done
 
-    # ── Start Docker machine if needed (macOS) ──
-    if docker info &>/dev/null 2>&1; then
-        print_status "SUCCESS" "✅ Docker is working"
+    # ── Start Podman machine if needed (macOS) ──
+    if podman info &>/dev/null 2>&1; then
+        print_status "SUCCESS" "✅ Podman is working"
     else
-        print_status "INFO" "📦 Starting Docker machine..."
-        docker machine init 2>/dev/null || true
-        docker machine start 2>/dev/null || true
+        print_status "INFO" "📦 Starting Podman machine..."
+        podman machine init 2>/dev/null || true
+        podman machine start 2>/dev/null || true
         sleep 3
     fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  DOCKER CHECK
+#  PODMAN CHECK
 # ─────────────────────────────────────────────────────────────────────────────
-check_docker() {
+check_podman() {
+    # Setup Rootless Environment
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/podman-run-$(id -u)}"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+
+    # Configure Podman for Rootless/Cloud
+    mkdir -p "$HOME/.config/containers"
+    
+    # Storage Config (Force VFS for compatibility)
+    if [ ! -f "$HOME/.config/containers/storage.conf" ]; then
+        print_status "INFO" "🔧 Configuring rootless storage..."
+        cat > "$HOME/.config/containers/storage.conf" << EOF
+[storage]
+driver = "vfs"
+runroot = "$XDG_RUNTIME_DIR"
+graphroot = "$HOME/.local/share/containers/storage"
+EOF
+    fi
+
+    # Registries Config
+    if [ ! -f "$HOME/.config/containers/registries.conf" ]; then
+        print_status "INFO" "🔧 Configuring rootless registries..."
+        cat > "$HOME/.config/containers/registries.conf" << EOF
+unqualified-search-registries = ["${REGISTRY_URL}", "quay.io"]
+[[registry]]
+location = "${REGISTRY_URL}"
+[[registry]]
+location = "quay.io"
+EOF
+    fi
+
     install_all_dependencies
 
-    # Verify docker works
-    if ! docker info &>/dev/null 2>&1; then
-        print_status "WARN" "⚠️  Docker daemon not running, trying to start..."
-        sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || true
-        sleep 3
-        if ! docker info &>/dev/null 2>&1; then
-            print_status "ERROR" "❌ Docker is not working. Ensure you have permissions (sudo usermod -aG docker $USER)."
+    # Verify podman works
+    if ! podman info &>/dev/null 2>&1; then
+        print_status "WARN" "⚠️  Podman is not responding. Checking configuration..."
+        if ! podman info 2>&1 | grep -q "Error"; then
+            print_status "SUCCESS" "✅ Podman is working in rootless mode"
+        else
+            print_status "ERROR" "❌ Podman rootless failed. Last error:"
+            podman info 2>&1 | head -n 5
             exit 1
         fi
     fi
@@ -255,7 +278,7 @@ check_docker() {
     total_mem_mb=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 524288) / 1024 ))
     local host_cpus
     host_cpus=$(nproc 2>/dev/null || echo 2)
-    print_status "INFO" "🐎 Docker ready | ${total_mem_mb}MB RAM | ${host_cpus} CPUs"
+    print_status "INFO" "🐎 Podman ready | ${total_mem_mb}MB RAM | ${host_cpus} CPUs"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,14 +296,14 @@ is_vm_running() {
     local vm_name="$1"
     local container_name="vm-${vm_name}"
     local state
-    state=$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "")
+    state=$(podman inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "")
     [[ "$state" == "running" ]]
 }
 
 get_vm_pid() {
     local vm_name="$1"
     local container_name="vm-${vm_name}"
-    docker inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || echo ""
+    podman inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || echo ""
 }
 
 REQUIRED_CONFIG_VARS=(
@@ -361,7 +384,7 @@ setup_vm_image() {
     fi
 
     # Check if image exists locally
-    if docker image inspect "$image" &>/dev/null; then
+    if podman image inspect "$image" &>/dev/null; then
         print_status "INFO" "📦 Image already exists locally: $image"
         return 0
     fi
@@ -400,19 +423,19 @@ setup_vm_image() {
         
         # Try with --tls-verify=false if standard pull fails (common in some restricted networks)
         local pull_output
-        pull_output=$(docker pull "$variant" 2>&1)
+        pull_output=$(podman pull "$variant" 2>&1)
         local pull_exit=$?
         
         if [ $pull_exit -ne 0 ]; then
             print_status "INFO" "🔄 Pull failed, retrying with --tls-verify=false..."
-            pull_output=$(docker pull --tls-verify=false "$variant" 2>&1)
+            pull_output=$(podman pull --tls-verify=false "$variant" 2>&1)
             pull_exit=$?
         fi
 
         if [ $pull_exit -eq 0 ]; then
             # Tag to requested name if different
             if [[ "$variant" != "$image" ]]; then
-                docker tag "$variant" "$image" 2>/dev/null || true
+                podman tag "$variant" "$image" 2>/dev/null || true
             fi
             print_status "SUCCESS" "✅ Image ready: $variant"
             return 0
@@ -420,7 +443,7 @@ setup_vm_image() {
     done
 
     print_status "ERROR" "❌ Failed to pull any image variant"
-    print_status "INFO"  "🔍 Last error from Docker:"
+    print_status "INFO"  "🔍 Last error from Podman:"
     echo "$pull_output" | sed 's/^/   /'
     echo
     print_status "INFO"  "💡 Possible causes:"
@@ -429,7 +452,7 @@ setup_vm_image() {
     print_status "INFO" "   3. DNS resolution failed"
     print_status "INFO" "   4. Registries not configured in /etc/containers/registries.conf"
     echo
-    print_status "INFO" "💡 Try manually: docker pull ${REGISTRY_URL}/library/alpine:latest"
+    print_status "INFO" "💡 Try manually: podman pull ${REGISTRY_URL}/library/alpine:latest"
     return 1
 }
 
@@ -641,7 +664,7 @@ start_vm() {
     fi
 
     # Verify image
-    if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    if ! podman image inspect "$IMAGE_NAME" &>/dev/null; then
         setup_vm_image "$IMAGE_NAME" || return 1
     fi
 
@@ -654,7 +677,7 @@ start_vm() {
     fi
 
     # Remove old container if exists (stopped)
-    docker rm -f "$container_name" 2>/dev/null || true
+    podman rm -f "$container_name" 2>/dev/null || true
 
     # Create setup script
     local setup_script="$VM_DIR/$vm_name/setup-ssh.sh"
@@ -668,8 +691,8 @@ start_vm() {
     print_status "INFO" "🚀 Starting VM: $vm_name..."
     print_status "INFO" "📊 Config: ${MEMORY} RAM | ${CPUS} CPUs | SSH:$SSH_PORT"
 
-    # Build docker run command
-    local docker_cmd=(docker run
+    # Build podman run command
+    local podman_cmd=(podman run
         -d
         --name "$container_name"
         --hostname "$HOSTNAME"
@@ -681,7 +704,7 @@ start_vm() {
     )
 
     # Run container (keep it alive with sleep or sshd)
-    docker run \
+    podman run \
         -d \
         --name "$container_name" \
         --hostname "$HOSTNAME" \
@@ -701,8 +724,8 @@ start_vm() {
         log INFO "VM started: $vm_name (SSH port: $SSH_PORT)"
     else
         print_status "WARN" "⚠️  VM may have failed to start"
-        print_status "INFO"  "💡 Check logs: docker logs $container_name"
-        docker logs "$container_name" 2>/dev/null | tail -5 || true
+        print_status "INFO"  "💡 Check logs: podman logs $container_name"
+        podman logs "$container_name" 2>/dev/null | tail -5 || true
     fi
 }
 
@@ -713,7 +736,7 @@ stop_vm() {
     if ! is_vm_running "$vm_name"; then
         # Check if container exists but stopped
         local state
-        state=$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "missing")
+        state=$(podman inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "missing")
         if [[ "$state" == "missing" ]]; then
             print_status "WARN" "⚠️  VM '$vm_name' does not exist"
             return 0
@@ -723,7 +746,7 @@ stop_vm() {
     fi
 
     print_status "INFO" "🛑 Stopping VM: $vm_name..."
-    docker stop -t 10 "$container_name" 2>/dev/null || docker kill "$container_name" 2>/dev/null || true
+    podman stop -t 10 "$container_name" 2>/dev/null || podman kill "$container_name" 2>/dev/null || true
 
     print_status "SUCCESS" "✅ VM '$vm_name' stopped"
     log INFO "VM stopped: $vm_name"
@@ -750,7 +773,7 @@ delete_vm() {
     fi
 
     # Stop and remove container
-    docker rm -f "$container_name" 2>/dev/null || true
+    podman rm -f "$container_name" 2>/dev/null || true
 
     # Remove VM directory
     if [[ -d "$VM_DIR/$vm_name" ]]; then
@@ -811,9 +834,9 @@ show_vm_performance() {
     echo "═══════════════════════════════════════════════"
     echo "  Performance: $vm_name"
     echo "───────────────────────────────────────────────"
-    echo "  CPU: $(docker stats --no-stream --format '{{.CPUPerc}}' "$container_name" 2>/dev/null || echo 'N/A')"
-    echo "  MEM: $(docker stats --no-stream --format '{{.MemUsage}}' "$container_name" 2>/dev/null || echo 'N/A')"
-    echo "  NET: $(docker stats --no-stream --format '{{.NetInput}} / {{.NetOutput}}' "$container_name" 2>/dev/null || echo 'N/A')"
+    echo "  CPU: $(podman stats --no-stream --format '{{.CPUPerc}}' "$container_name" 2>/dev/null || echo 'N/A')"
+    echo "  MEM: $(podman stats --no-stream --format '{{.MemUsage}}' "$container_name" 2>/dev/null || echo 'N/A')"
+    echo "  NET: $(podman stats --no-stream --format '{{.NetInput}} / {{.NetOutput}}' "$container_name" 2>/dev/null || echo 'N/A')"
     echo "  PID: $(get_vm_pid "$vm_name")"
     echo "═══════════════════════════════════════════════"
 }
@@ -922,15 +945,15 @@ fix_vm_issues() {
 
     local issues=0
 
-    # Check 1: Docker works
-    if ! docker info &>/dev/null 2>&1; then
-        print_status "INFO" "🔧 Docker not working — reinstalling..."
+    # Check 1: Podman works
+    if ! podman info &>/dev/null 2>&1; then
+        print_status "INFO" "🔧 Podman not working — reinstalling..."
         install_all_dependencies
         (( issues++ )) || true
     fi
 
     # Check 2: Image exists
-    if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    if ! podman image inspect "$IMAGE_NAME" &>/dev/null; then
         print_status "INFO" "🔧 Image missing — downloading..."
         setup_vm_image "$IMAGE_NAME" || true
         (( issues++ )) || true
@@ -939,10 +962,10 @@ fix_vm_issues() {
     # Check 3: Orphan container
     local container_name="vm-${vm_name}"
     local state
-    state=$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "missing")
+    state=$(podman inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "missing")
     if [[ "$state" == "exited" ]]; then
         print_status "INFO" "🔧 Stale container found — cleaning up..."
-        docker rm "$container_name" 2>/dev/null || true
+        podman rm "$container_name" 2>/dev/null || true
         (( issues++ )) || true
     fi
 
@@ -956,7 +979,7 @@ fix_vm_issues() {
     # Check 5: SSH keys
     if ! is_vm_running "$vm_name"; then
         print_status "INFO" "🔧 VM is stopped — checking if it can start..."
-        if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+        if ! podman image inspect "$IMAGE_NAME" &>/dev/null; then
             setup_vm_image "$IMAGE_NAME" || true
         fi
     fi
@@ -1005,7 +1028,7 @@ clone_vm() {
     local container_name="vm-${vm_name}"
     if is_vm_running "$vm_name"; then
         print_status "INFO" "📦 Committing current state as new image..."
-        docker commit "$container_name" "vm-${clone_name}:latest" 2>/dev/null || true
+        podman commit "$container_name" "vm-${clone_name}:latest" 2>/dev/null || true
         IMAGE_NAME="vm-${clone_name}:latest"
         save_vm_config "$clone_name"
     fi
@@ -1057,7 +1080,7 @@ snapshot_create() {
     local container_name="vm-${vm_name}"
     if is_vm_running "$vm_name"; then
         # Commit running container as snapshot
-        docker commit "$container_name" "snap-${vm_name}-${snap_name}:latest" 2>/dev/null || true
+        podman commit "$container_name" "snap-${vm_name}-${snap_name}:latest" 2>/dev/null || true
     fi
 
     # Save config as snapshot
@@ -1067,7 +1090,7 @@ snapshot_create() {
 name=$snap_name
 vm=$vm_name
 created=$(date)
-container_state=$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "unknown")
+container_state=$(podman inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "unknown")
 EOF
 
     print_status "SUCCESS" "✅ Snapshot '$snap_name' created for '$vm_name'"
@@ -1129,15 +1152,15 @@ snapshot_revert() {
 
         # Stop VM first
         if is_vm_running "$vm_name"; then
-            docker stop "$container_name" 2>/dev/null || true
+            podman stop "$container_name" 2>/dev/null || true
         fi
 
         # Remove old container
-        docker rm -f "$container_name" 2>/dev/null || true
+        podman rm -f "$container_name" 2>/dev/null || true
 
         # Try to restore from committed image
         local snap_image="snap-${vm_name}-${target}:latest"
-        if docker image inspect "$snap_image" &>/dev/null; then
+        if podman image inspect "$snap_image" &>/dev/null; then
             # Restore config from snapshot
             cp "$snap_dir/${target}-config.sh" "$VM_DIR/$vm_name/config.sh" 2>/dev/null || true
             load_vm_config "$vm_name"
@@ -1150,7 +1173,7 @@ snapshot_revert() {
             get_ssh_setup_script > "$setup_script"
             chmod +x "$setup_script"
 
-            docker run -d 
+            podman run -d 
                 --name "$container_name" 
                 --hostname "$HOSTNAME" 
                 -p "$SSH_PORT:22" 
@@ -1200,7 +1223,7 @@ snapshot_delete() {
         rm -f "$snap_dir/${target}-config.sh"
         rm -f "$snap_dir/${target}.meta"
         # Remove committed image
-        docker rmi "snap-${vm_name}-${target}:latest" 2>/dev/null || true
+        podman rmi "snap-${vm_name}-${target}:latest" 2>/dev/null || true
 
         print_status "SUCCESS" "✅ Snapshot '$target' deleted"
         log INFO "Snapshot deleted: $vm_name/$target"
@@ -1226,13 +1249,13 @@ backup_vm() {
     # Stop VM for consistent backup
     if is_vm_running "$vm_name"; then
         print_status "INFO" "ℹ️  Stopping VM for consistent backup..."
-        docker stop "vm-${vm_name}" 2>/dev/null || true
+        podman stop "vm-${vm_name}" 2>/dev/null || true
     fi
 
     # Commit container state
     local container_name="vm-${vm_name}"
-    docker commit "$container_name" "backup-${vm_name}-latest" 2>/dev/null || true
-    docker save -o "$backup_dir/${vm_name}-image.tar" "backup-${vm_name}-latest" 2>/dev/null || true
+    podman commit "$container_name" "backup-${vm_name}-latest" 2>/dev/null || true
+    podman save -o "$backup_dir/${vm_name}-image.tar" "backup-${vm_name}-latest" 2>/dev/null || true
 
     # Create full backup tarball
     tar czf "$backup_file" -C "$VM_DIR" "$vm_name" 2>/dev/null
@@ -1287,7 +1310,7 @@ restore_vm() {
 
         # Load image if exists
         if [[ -f "$VM_DIR/backups"/*-image.tar ]]; then
-            docker load -i "$VM_DIR/backups"/*-image.tar 2>/dev/null || true
+            podman load -i "$VM_DIR/backups"/*-image.tar 2>/dev/null || true
             rm -f "$VM_DIR/backups"/*-image.tar
         fi
 
@@ -1318,7 +1341,7 @@ start_autostart_vms() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  LIST ALL VMs (including docker native)
+#  LIST ALL VMs (including podman native)
 # ─────────────────────────────────────────────────────────────────────────────
 list_all_vms() {
     echo "═══════════════════════════════════════════════"
@@ -1338,9 +1361,9 @@ list_all_vms() {
 
     echo
     echo "═══════════════════════════════════════════════"
-    echo "  Docker containers:"
+    echo "  Podman containers:"
     echo "───────────────────────────────────────────────"
-    docker ps -a --format "table {{.Names}}t{{.Status}}t{{.Ports}}" 2>/dev/null | grep -E "vm-|^NAMES" || echo "  (none)"
+    podman ps -a --format "table {{.Names}}t{{.Status}}t{{.Ports}}" 2>/dev/null | grep -E "vm-|^NAMES" || echo "  (none)"
     echo "═══════════════════════════════════════════════"
 }
 
@@ -1503,7 +1526,7 @@ run_cli() {
 # ─────────────────────────────────────────────────────────────────────────────
 cleanup() {
     # Clean up stale snapshot images
-    docker images --filter "reference=snap-*" --format "{{.ID}}" 2>/dev/null | while read -r id; do
+    podman images --filter "reference=snap-*" --format "{{.ID}}" 2>/dev/null | while read -r id; do
         # Keep them — they're snapshots
         true
     done
@@ -1519,7 +1542,7 @@ mkdir -p "$VM_DIR"
 mkdir -p "$DATA_DIR"
 
 if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
-    echo "Enhanced Multi-VM Manager v${SCRIPT_VERSION} (Docker Edition)"
+    echo "Enhanced Multi-VM Manager v${SCRIPT_VERSION} (Podman Edition)"
     echo ""
     echo "Usage:"
     echo "  $SCRIPT_NAME              Interactive menu"
@@ -1538,8 +1561,8 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo "  autostart                 Start all autostart VMs"
     echo ""
     echo "Features:"
-    echo "  - No root required (Docker runs as user)"
-    echo "  - No daemon needed (Docker is daemonless)"
+    echo "  - No root required (Podman runs as user)"
+    echo "  - No daemon needed (Podman is daemonless)"
     echo "  - Auto-installs all dependencies"
     echo "  - Works on any Linux distribution"
     echo "  - Multi-OS: Ubuntu, Debian, Alpine, CentOS, Fedora, Arch"
@@ -1552,9 +1575,9 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
 fi
 
 if [[ -n "${1:-}" ]]; then
-    check_docker
+    check_podman
     run_cli "$@"
 else
-    check_docker
+    check_podman
     main_menu
 fi
