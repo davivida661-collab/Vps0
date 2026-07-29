@@ -381,17 +381,65 @@ setup_vm_image() {
         return 0
     fi
 
-    # Pull the image
-    print_status "INFO" "📥 Downloading Docker image: $image..."
-    docker pull "$image" 2>&1 | tail -5
+    # Try pulling from multiple registries/mirrors
+    local registries=(
+        ""                    # Docker Hub (default)
+        "mirror.gcr.io/"      # Google mirror
+        "registry-1.docker.io/" # Direct registry
+    )
 
-    if ! docker image inspect "$image" &>/dev/null; then
-        print_status "ERROR" "❌ Failed to pull image: $image"
-        return 1
+    # Also try alternative image names
+    local image_variants=()
+    if [[ "$image" == ubuntu* ]]; then
+        image_variants=("ubuntu:22.04" "ubuntu:20.04" "ubuntu:latest" "$image")
+    elif [[ "$image" == debian* ]]; then
+        image_variants=("debian:bookworm" "debian:bullseye" "debian:latest" "$image")
+    elif [[ "$image" == alpine* ]]; then
+        image_variants=("alpine:3.18" "alpine:3.17" "alpine:latest" "$image")
+    elif [[ "$image" == centos* ]]; then
+        image_variants=("centos:7" "quay.io/centos/centos:stream8" "$image")
+    elif [[ "$image" == fedora* ]]; then
+        image_variants=("fedora:latest" "fedora:38" "$image")
+    elif [[ "$image" == rocky* ]]; then
+        image_variants=("rockylinux:9-minimal" "rockylinux:8-minimal" "$image")
+    elif [[ "$image" == arch* ]]; then
+        image_variants=("archlinux:latest" "$image")
+    else
+        image_variants=("$image")
     fi
 
-    print_status "SUCCESS" "✅ Image downloaded: $image"
-    return 0
+    for variant in "${image_variants[@]}"; do
+        for registry in "${registries[@]}"; do
+            local full_image="${registry}${variant}"
+            print_status "INFO" "📥 Trying: $full_image..."
+            local pull_output
+            pull_output=$(docker pull "$full_image" 2>&1)
+            local pull_exit=$?
+
+            if [ $pull_exit -eq 0 ]; then
+                # Tag it to the requested name if different
+                if [[ "$full_image" != "$image" ]]; then
+                    docker tag "$full_image" "$image" 2>/dev/null || true
+                fi
+                print_status "SUCCESS" "✅ Image downloaded: $full_image"
+                return 0
+            fi
+
+            # Show last line of error for diagnosis
+            echo "$pull_output" | tail -1 | head -c 100
+        done
+    done
+
+    print_status "ERROR" "❌ Failed to pull any image variant."
+    print_status "INFO"  "💡 Possible causes:"
+    print_status "INFO"  "   1. No internet connection from the container"
+    print_status "INFO"  "   2. Docker Hub rate limit reached"
+    print_status "INFO"  "   3. DNS resolution failed inside the container"
+    echo
+    print_status "INFO"  "💡 Try manually to check:"
+    print_status "INFO"  "   docker pull alpine:latest"
+    print_status "INFO"  "   curl -s https://index.docker.io/v1/"
+    exit 1
 }
 
 get_default_image() {
