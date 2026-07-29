@@ -58,6 +58,13 @@ init_rootless_configs() {
     mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/containers" "$XDG_DATA_HOME/containers/storage"
     chmod 700 "$XDG_RUNTIME_DIR"
 
+    # Check for driver mismatch and fix it
+    if podman info 2>&1 | grep -q "overwritten by graph driver"; then
+        print_status "WARN" "Driver mismatch detected. Cleaning old storage cache..."
+        rm -rf "$XDG_DATA_HOME/containers/storage"
+        mkdir -p "$XDG_DATA_HOME/containers/storage"
+    fi
+
     # 1. Force VFS Storage (Crucial for Cloud/CoCalc)
     cat > "$XDG_CONFIG_HOME/containers/storage.conf" << EOF
 [storage]
@@ -66,6 +73,8 @@ runroot = "$XDG_RUNTIME_DIR"
 graphroot = "$XDG_DATA_HOME/containers/storage"
 [storage.options]
 additionalimagestores = []
+# Avoid UID/GID mapping errors in restricted environments
+ignore_chown_errors = "true"
 EOF
 
     # 2. Registries Config
@@ -124,9 +133,13 @@ setup_vm_image() {
     # Attempt 1: Standard Pull
     if podman pull "$image"; then return 0; fi
 
-    # Attempt 2: TLS Verify False
-    print_status "WARN" "Standard pull failed. Retrying without TLS verification..."
-    if podman pull --tls-verify=false "$image"; then return 0; fi
+    # Attempt 2: Force Rootless mapping pull
+    print_status "WARN" "Standard pull failed. Retrying with rootless mapping..."
+    if podman pull --ignore-chown-errors "$image"; then return 0; fi
+
+    # Attempt 3: TLS Verify False
+    print_status "WARN" "Retrying without TLS verification..."
+    if podman pull --tls-verify=false --ignore-chown-errors "$image"; then return 0; fi
 
     # Attempt 3: Diagnostic & Manual Advice
     diagnose_network || {
@@ -203,9 +216,11 @@ echo 'user ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers;
 /usr/sbin/sshd -D
 "
 
+    # Use --userns=keep-id to avoid UID mapping issues in CoCalc
     podman run -d \
         --name "vm-$name" \
         -p "$SSH_PORT:22" \
+        --userns=keep-id \
         --restart unless-stopped \
         "$IMAGE_NAME" \
         bash -c "$setup"
