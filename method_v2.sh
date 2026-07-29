@@ -115,31 +115,143 @@ validate_input() {
 # ─────────────────────────────────────────────────────────────────────────────
 #  KVM & SYSTEM CHECKS
 # ─────────────────────────────────────────────────────────────────────────────
-check_kvm() {
-    # Check /dev/kvm
+# Detect package manager
+get_pkg_manager() {
+    if command -v apt-get &>/dev/null; then echo "apt"; return; fi
+    if command -v dnf &>/dev/null; then echo "dnf"; return; fi
+    if command -v yum &>/dev/null; then echo "yum"; return; fi
+    if command -v pacman &>/dev/null; then echo "pacman"; return; fi
+    if command -v apk &>/dev/null; then echo "apk"; return; fi
+    echo "unknown"
+}
+
+pkg_install() {
+    local pm
+    pm=$(get_pkg_manager)
+    case "$pm" in
+        apt)   sudo apt-get update -qq 2>/dev/null; sudo apt-get install -y -qq "$@" 2>&1 | tail -3 ;;
+        dnf)   sudo dnf install -y -q "$@" 2>&1 | tail -3 ;;
+        yum)   sudo yum install -y -q "$@" 2>&1 | tail -3 ;;
+        pacman) sudo pacman -Sy --noconfirm "$@" 2>&1 | tail -3 ;;
+        apk)   sudo apk add "$@" 2>&1 | tail -3 ;;
+        *)     print_status "WARN" "⚠️  Unknown package manager — manual install needed" ;;
+    esac
+}
+
+install_all_dependencies() {
+    print_status "INFO" "🔧 Installing all system dependencies automatically..."
+
+    # Update package lists
+    local pm
+    pm=$(get_pkg_manager)
+    case "$pm" in
+        apt) sudo apt-get update -qq 2>/dev/null ;;
+        dnf) sudo dnf makecache -q 2>/dev/null ;;
+        pacman) sudo pacman -Sy 2>/dev/null ;;
+    esac
+
+    # Core build tools
+    pkg_install gcc make git
+
+    # KVM modules
     if [[ ! -e /dev/kvm ]]; then
-        print_status "ERROR" "❌ /dev/kvm not found — KVM is not available"
-        print_status "INFO"  "💡 Try: sudo modprobe kvm && sudo modprobe kvm_intel  (or kvm_amd)"
-        exit 1
+        print_status "INFO" "📦 Loading KVM modules..."
+        sudo modprobe kvm 2>/dev/null || true
+        sudo modprobe kvm_intel 2>/dev/null || sudo modprobe kvm_amd 2>/dev/null || true
+        sudo chmod 666 /dev/kvm 2>/dev/null || true
     fi
 
-    if [[ ! -r /dev/kvm ]]; then
-        print_status "ERROR" "❌ No read permission on /dev/kvm"
-        print_status "INFO"  "💡 Try: sudo chmod 666 /dev/kvm"
-        exit 1
+    # KVM tool packages
+    case "$pm" in
+        apt)
+            # Install kvmtool if available, plus all needed libs
+            pkg_install qemu-utils e2fsprogs debootstrap openssl openssh-server 2>/dev/null || true
+            pkg_install zlib1g-dev libaio-dev 2>/dev/null || true
+            ;;
+        dnf|yum)
+            pkg_install qemu-img e2fsprogs debootstrap openssl openssh-server 2>/dev/null || true
+            pkg_install zlib-devel libaio-devel 2>/dev/null || true
+            ;;
+        pacman)
+            pkg_install qemu-tools e2fsprogs debootstrap openssl openssh 2>/dev/null || true
+            pkg_install zlib 2>/dev/null || true
+            ;;
+        apk)
+            pkg_install qemu-img e2fsprogs e2fsprogs-extra openssl openssh-server 2>/dev/null || true
+            pkg_install zlib-dev linux-headers 2>/dev/null || true
+            ;;
+    esac
+
+    # Install kernel if no vmlinuz in /boot
+    if [[ ! -f /boot/vmlinuz-* ]]; then
+        print_status "INFO" "📦 Installing kernel..."
+        case "$pm" in
+            apt)   pkg_install linux-image-generic 2>/dev/null || true ;;
+            dnf|yum) pkg_install kernel 2>/dev/null || true ;;
+            pacman) pkg_install linux 2>/dev/null || true ;;
+            apk)   pkg_install linux-lts 2>/dev/null || true ;;
+        esac
     fi
 
-    # Check host resources
-    local total_mem_kb
-    total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    local total_mem_mb=$((total_mem_kb / 1024))
-    if [ "$total_mem_mb" -lt 512 ]; then
-        print_status "WARN" "⚠️  Host has only ${total_mem_mb}MB RAM — VMs will be limited"
+    # Ensure e2fsprogs for mkfs.ext4
+    if ! command -v mkfs.ext4 &>/dev/null; then
+        print_status "INFO" "📦 Installing e2fsprogs..."
+        case "$pm" in
+            apt)   pkg_install e2fsprogs 2>/dev/null || true ;;
+            dnf|yum) pkg_install e2fsprogs 2>/dev/null || true ;;
+            pacman) pkg_install e2fsprogs 2>/dev/null || true ;;
+            apk)   pkg_install e2fsprogs 2>/dev/null || true ;;
+        esac
     fi
 
-    local host_cpus
-    host_cpus=$(nproc 2>/dev/null || echo 1)
-    print_status "INFO" "🐎 KVM available | ${total_mem_mb}MB RAM | ${host_cpus} CPUs"
+    # Ensure debootstrap
+    if ! command -v debootstrap &>/dev/null; then
+        print_status "INFO" "📦 Installing debootstrap..."
+        case "$pm" in
+            apt)   pkg_install debootstrap 2>/dev/null || true ;;
+            dnf|yum) pkg_install debootstrap 2>/dev/null || true ;;
+            pacman) pkg_install debootstrap 2>/dev/null || true ;;
+            apk)   pkg_install debootstrap 2>/dev/null || true ;;
+        esac
+    fi
+
+    # Ensure openssl
+    if ! command -v openssl &>/dev/null; then
+        print_status "INFO" "📦 Installing openssl..."
+        pkg_install openssl 2>/dev/null || true
+    fi
+
+    print_status "SUCCESS" "✅ All dependencies installed"
+}
+
+check_kvm() {
+    # Auto-install everything first
+    install_all_dependencies
+
+    # Check /dev/kvm — try to enable it automatically
+    if [[ ! -e /dev/kvm ]]; then
+        print_status "INFO" "📦 KVM not available — trying to enable..."
+        sudo modprobe kvm 2>/dev/null || true
+        sudo modprobe kvm_intel 2>/dev/null || sudo modprobe kvm_amd 2>/dev/null || true
+        sudo chmod 666 /dev/kvm 2>/dev/null || true
+    fi
+
+    if [[ ! -e /dev/kvm ]]; then
+        print_status "WARN" "⚠️  /dev/kvm not found — KVM may not be available"
+        print_status "WARN" "⚠️  VMs will use software emulation (slower)"
+        print_status "INFO"  "💡 To enable KVM: sudo modprobe kvm_intel (or kvm_amd)"
+        print_status "INFO"  "💡 Check: cat /proc/cpuinfo | grep -E 'vmx|svm'"
+    else
+        if [[ ! -r /dev/kvm ]]; then
+            sudo chmod 666 /dev/kvm 2>/dev/null || true
+        fi
+        local total_mem_kb
+        total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+        local total_mem_mb=$((total_mem_kb / 1024))
+        local host_cpus
+        host_cpus=$(nproc 2>/dev/null || echo 1)
+        print_status "INFO" "🐎 KVM available | ${total_mem_mb}MB RAM | ${host_cpus} CPUs"
+    fi
 }
 
 build_kvmtool() {
@@ -147,28 +259,9 @@ build_kvmtool() {
         return 0
     fi
 
-    print_status "INFO" "🔧 Building kvmtool from source..."
+    print_status "INFO" "🔧 Building kvmtool from source (fully automatic)..."
 
-    # Check build dependencies
-    local build_deps=("gcc" "make")
-    local missing_deps=()
-    for dep in "${build_deps[@]}"; do
-        if ! command -v "$dep" &>/dev/null; then
-            missing_deps+=("$dep")
-        fi
-    done
-
-    if [ "${#missing_deps[@]}" -gt 0 ]; then
-        print_status "INFO" "📦 Installing build tools: ${missing_deps[*]}"
-        if command -v apt-get &>/dev/null; then
-            sudo apt-get install -y gcc make zlib1g-dev libaio-dev 2>&1 | tail -3
-        elif command -v dnf &>/dev/null; then
-            sudo dnf install -y gcc make zlib-devel libaio-devel 2>&1 | tail -3
-        elif command -v pacman &>/dev/null; then
-            sudo pacman -Sy --noconfirm gcc make zlib 2>&1 | tail -3
-        fi
-    fi
-
+    # Dependencies already installed by install_all_dependencies
     # Clone and build
     mkdir -p "$LKVM_DIR"
     local build_dir=$(mktemp -d)
@@ -189,16 +282,35 @@ build_kvmtool() {
     fi
 
     if [[ ! -f "$build_dir/kvmtool/Makefile" ]]; then
-        # Last resort: try to install from package manager
+        # Try package manager as last resort
         print_status "INFO" "📦 Trying package manager install..."
-        sudo apt-get install -y kvmtool 2>/dev/null && \
-            command -v lkvm &>/dev/null && { cp "$(which lkvm)" "$LKVM_BIN" 2>/dev/null || true; rm -rf "$build_dir"; return 0; }
-        print_status "ERROR" "❌ Failed to build/install kvmtool"
-        rm -rf "$build_dir"
-        exit 1
+        local pm
+        pm=$(get_pkg_manager)
+        case "$pm" in
+            apt)   sudo apt-get install -y kvmtool 2>/dev/null ;;
+            dnf|yum) sudo dnf install -y kvmtool 2>/dev/null ;;
+            pacman) sudo pacman -S --noconfirm kvmtool 2>/dev/null ;;
+        esac
+        if command -v lkvm &>/dev/null; then
+            cp "$(which lkvm)" "$LKVM_BIN" 2>/dev/null || true
+            chmod +x "$LKVM_BIN"
+            rm -rf "$build_dir"
+            print_status "SUCCESS" "✅ kvmtool installed via package manager"
+            return 0
+        fi
+        print_status "ERROR" "❌ Failed to build/install kvmtool — check internet connection"
+        print_status "INFO"  "💡 Retrying in 5 seconds..."
+        sleep 5
+        # One more attempt with GitHub
+        git clone --depth 1 https://github.com/kvmtool/kvmtool.git "$build_dir/kvmtool" 2>&1 | tail -3 || true
+        if [[ ! -f "$build_dir/kvmtool/Makefile" ]]; then
+            print_status "ERROR" "❌ Cannot install kvmtool. Check internet and try again."
+            rm -rf "$build_dir"
+            exit 1
+        fi
     fi
 
-    print_status "INFO" "🔨 Compiling kvmtool..."
+    print_status "INFO" "🔨 Compiling kvmtool with $(nproc) threads..."
     cd "$build_dir/kvmtool"
     make -j"$(nproc)" 2>&1 | tail -5
     cp lkvm "$LKVM_BIN" 2>/dev/null || cp kvm "$LKVM_BIN" 2>/dev/null || true
@@ -207,9 +319,13 @@ build_kvmtool() {
     rm -rf "$build_dir"
 
     if [[ -x "$LKVM_BIN" ]]; then
-        print_status "SUCCESS" "✅ kvmtool built at $LKVM_BIN"
+        print_status "SUCCESS" "✅ kvmtool built and installed at $LKVM_BIN"
     else
         print_status "ERROR" "❌ Build failed — lkvm binary not found"
+        print_status "INFO"  "💡 Trying one more time with different flags..."
+        cd "$build_dir/kvmtool" 2>/dev/null && make -j1 V=1 2>&1 | tail -10
+        cd - >/dev/null
+        rm -rf "$build_dir"
         exit 1
     fi
 }
@@ -321,38 +437,66 @@ get_kernel() {
         return 0
     fi
 
-    print_status "INFO" "📥 Downloading kernel for $os_type..."
+    print_status "INFO" "📥 Preparing kernel for $os_type..."
 
-    local kernel_url=""
-    case "${os_type,,}" in
-        ubuntu*)
-            kernel_url="https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz"
-            ;;
-        debian*)
-            kernel_url="https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz"
-            ;;
-        alpine*)
-            kernel_url="https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz"
-            ;;
-        *)
-            kernel_url="https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz"
-            ;;
-    esac
+    # First, make sure kernel is installed
+    if [[ ! -f /boot/vmlinuz-* ]]; then
+        print_status "INFO" "📦 Installing kernel package..."
+        local pm
+        pm=$(get_pkg_manager)
+        case "$pm" in
+            apt)   pkg_install linux-image-generic 2>/dev/null || true ;;
+            dnf|yum) pkg_install kernel 2>/dev/null || true ;;
+            pacman) pkg_install linux 2>/dev/null || true ;;
+            apk)   pkg_install linux-lts linux-lts-headers 2>/dev/null || true ;;
+        esac
+    fi
 
-    # For kvmtool, we use the host kernel directly (same arch)
-    # This is the most reliable approach
+    # Find kernel
     local host_kernel
     host_kernel=$(find /boot -name "vmlinuz-*" -type f 2>/dev/null | sort -V | tail -1)
+    if [[ -z "$host_kernel" ]]; then
+        host_kernel=$(find /boot -name "vmlinuz" -type f 2>/dev/null | head -1)
+    fi
+
     if [[ -n "$host_kernel" && -f "$host_kernel" ]]; then
         cp "$host_kernel" "$kernel_file"
-        print_status "SUCCESS" "✅ Using host kernel: $host_kernel"
+        print_status "SUCCESS" "✅ Kernel prepared: $host_kernel"
         echo "$kernel_file"
         return 0
     fi
 
-    print_status "ERROR" "❌ No kernel found in /boot"
-    print_status "INFO"  "💡 Install kernel headers: sudo apt install linux-image-generic"
-    return 1
+    # Fallback: download a minimal kernel from kernel.org
+    print_status "INFO" "📥 Downloading minimal kernel from kernel.org..."
+    local tmp_kernel="$VM_DIR/.shared-kernels/.tmp-kernel.tar.xz"
+    wget -q "https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz" -O "$tmp_kernel" 2>/dev/null || \
+    curl -sL "https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz" -o "$tmp_kernel" 2>/dev/null || true
+
+    if [[ -f "$tmp_kernel" && -s "$tmp_kernel" ]]; then
+        print_status "INFO" "🔨 Building minimal kernel..."
+        local kernel_build_dir=$(mktemp -d)
+        cd "$kernel_build_dir"
+        tar xf "$tmp_kernel" --one-top-level=linux 2>/dev/null || true
+        if [[ -d "linux" ]]; then
+            cd linux
+            make defconfig 2>/dev/null
+            make -j"$(nproc)" bzImage 2>/dev/null | tail -3
+            if [[ -f "arch/x86/boot/bzImage" ]]; then
+                cp "arch/x86/boot/bzImage" "$kernel_file"
+                print_status "SUCCESS" "✅ Kernel built and saved"
+                cd "$kernel_build_dir/.."
+                rm -rf "$kernel_build_dir" "$tmp_kernel"
+                echo "$kernel_file"
+                return 0
+            fi
+        fi
+        cd - >/dev/null
+        rm -rf "$kernel_build_dir" "$tmp_kernel"
+    fi
+
+    print_status "ERROR" "❌ Could not get a kernel"
+    print_status "INFO"  "💡 Manually install: sudo apt install linux-image-generic"
+    exit 1
 }
 
 setup_rootfs() {
@@ -365,7 +509,23 @@ setup_rootfs() {
         return 0
     fi
 
-    print_status "INFO" "📦 Preparing rootfs for $os_type..."
+    print_status "INFO" "📦 Preparing rootfs for $os_type (fully automatic)..."
+
+    # Ensure debootstrap is installed
+    if ! command -v debootstrap &>/dev/null; then
+        print_status "INFO" "📦 Installing debootstrap automatically..."
+        pkg_install debootstrap 2>/dev/null || true
+    fi
+
+    # Ensure e2fsprogs is installed
+    if ! command -v mkfs.ext4 &>/dev/null; then
+        pkg_install e2fsprogs 2>/dev/null || true
+    fi
+
+    # Ensure openssl is installed
+    if ! command -v openssl &>/dev/null; then
+        pkg_install openssl 2>/dev/null || true
+    fi
 
     local rootfs_size="2G"
     dd if=/dev/zero of="$rootfs_file" bs=1M count=2048 status=none 2>&1 || true
@@ -374,72 +534,75 @@ setup_rootfs() {
     # Mount and setup
     local mount_dir
     mount_dir=$(mktemp -d)
-    sudo mount -o loop "$rootfs_file" "$mount_dir" 2>/dev/null || {
-        # Try without sudo if already root
-        mount -o loop "$rootfs_file" "$mount_dir" 2>/dev/null || {
-            print_status "ERROR" "❌ Cannot mount rootfs — need root access"
-            sudo umount "$mount_dir" 2>/dev/null || true
+
+    # Try multiple mount methods
+    if ! sudo mount -o loop "$rootfs_file" "$mount_dir" 2>/dev/null; then
+        if ! mount -o loop "$rootfs_file" "$mount_dir" 2>/dev/null; then
+            print_status "ERROR" "❌ Cannot mount rootfs — need root access or loop device support"
             rm -f "$rootfs_file"
-            return 1
-        }
-    }
-
-    # Install base system using debootstrap or manual setup
-    if command -v debootstrap &>/dev/null; then
-        local suite="bookworm"
-        case "${os_type,,}" in
-            ubuntu*) suite="jammy" ;;
-            debian*) suite="bookworm" ;;
-            alpine*) ;; # debootstrap doesn't support alpine
-        esac
-
-        if [[ "${os_type,,}" != alpine* ]]; then
-            print_status "INFO" "📦 Bootstrapping $os_type base system..."
-            sudo debootstrap "$suite" "$mount_dir" 2>&1 | tail -3
+            rm -rf "$mount_dir"
+            exit 1
         fi
     fi
 
-    # Basic setup
-    sudo mkdir -p "$mount_dir"/{etc,dev,proc,sys,tmp,root,home,run,var/log} 2>/dev/null || true
-    sudo touch "$mount_dir/etc/fstab" 2>/dev/null || true
+    # Install base system
+    local suite="bookworm"
+    case "${os_type,,}" in
+        ubuntu*) suite="jammy" ;;
+        debian*) suite="bookworm" ;;
+        alpine*) suite="bookworm" ;; # Use debian base, install alpine packages inside
+    esac
+
+    if command -v debootstrap &>/dev/null && [[ "${os_type,,}" != alpine* ]]; then
+        print_status "INFO" "📦 Bootstrapping $os_type base system via debootstrap..."
+        sudo debootstrap "$suite" "$mount_dir" 2>&1 | tail -5 || true
+    fi
+
+    # Basic directory structure
+    sudo mkdir -p "$mount_dir"/{etc,dev,proc,sys,tmp,root,home,run,var/log,var/lib/dpkg,var/cache/apt/archives/partial} 2>/dev/null || true
+    sudo mkdir -p "$mount_dir"/etc/ssh 2>/dev/null || true
+
+    # fstab
     echo "/dev/vda / ext4 defaults 0 1" | sudo tee "$mount_dir/etc/fstab" >/dev/null 2>/dev/null || true
 
-    # Set hostname
+    # Hostname
     sudo sh -c "echo '$HOSTNAME' > $mount_dir/etc/hostname" 2>/dev/null || true
 
-    # Set up SSH
-    sudo sh -c "mkdir -p $mount_dir/etc/ssh" 2>/dev/null || true
-    sudo sh -c "echo 'PermitRootLogin yes' >> $mount_dir/etc/ssh/sshd_config" 2>/dev/null || true
+    # SSH config
+    sudo sh -c "echo 'PermitRootLogin yes' > $mount_dir/etc/ssh/sshd_config" 2>/dev/null || true
     sudo sh -c "echo 'PasswordAuthentication yes' >> $mount_dir/etc/ssh/sshd_config" 2>/dev/null || true
+    sudo sh -c "echo 'PubkeyAuthentication yes' >> $mount_dir/etc/ssh/sshd_config" 2>/dev/null || true
 
     # Create user
     sudo sh -c "echo '$USERNAME:x:1000:1000:$USERNAME,,,:/home/$USERNAME:/bin/bash' >> $mount_dir/etc/passwd" 2>/dev/null || true
+    sudo sh -c "echo '$USERNAME:x:1000:' >> $mount_dir/etc/group" 2>/dev/null || true
     sudo sh -c "mkdir -p $mount_dir/home/$USERNAME" 2>/dev/null || true
     sudo sh -c "chown 1000:1000 $mount_dir/home/$USERNAME" 2>/dev/null || true
 
     # Set password
     local hashed_pass
     hashed_pass=$(echo "$PASSWORD" | openssl passwd -6 -stdin 2>/dev/null || echo "$PASSWORD")
-    sudo sh -c "echo '${USERNAME}:${hashed_pass}' | chroot $mount_dir chpasswd 2>/dev/null || true" 2>/dev/null || true
-    sudo sh -c "echo 'root:${hashed_pass}' | chroot $mount_dir chpasswd 2>/dev/null || true" 2>/dev/null || true
+    sudo sh -c "echo 'root:${hashed_pass}:0:0:root:/root:/bin/bash' > $mount_dir/etc/shadow" 2>/dev/null || true
+    sudo sh -c "echo '${USERNAME}:${hashed_pass}:1000:0:99999:7:::' >> $mount_dir/etc/shadow" 2>/dev/null || true
 
-    # Enable serial console
-    sudo sh -c "echo 'console=ttyS0,115200' >> $mount_dir/etc/default/grub" 2>/dev/null || true
-    sudo sh -c "mkdir -p $mount_dir/etc/systemd/system/serial-getty@ttyS0.service.d" 2>/dev/null || true
+    # Serial console setup
+    sudo mkdir -p "$mount_dir/etc/systemd/system/getty@ttyS0.service.d" 2>/dev/null || true
+    sudo sh -c "cat > $mount_dir/etc/systemd/system/getty@ttyS0.service.d/override.conf << 'SEREOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear ttyS0 115200 linux
+SEREOF" 2>/dev/null || true
 
-    # Auto-start SSH
-    sudo sh -c "mkdir -p $mount_dir/etc/rc.local.d" 2>/dev/null || true
-    sudo sh -c "cat > $mount_dir/etc/init.d/ssh-start << 'INITEOF'
+    # Enable SSH on boot
+    sudo sh -c "cat > $mount_dir/etc/init.d/sshd-boot << 'SSHEOF'
 #!/bin/sh
 ### BEGIN INIT INFO
-# Provides:          ssh-start
-# Required-Start:    $network
-# Required-Stop:     $network
+# Provides:          sshd-boot
+# Required-Start:    \$network
 # Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Description:       Start SSH on boot
+# Description:       Start SSH daemon
 ### END INIT INFO
-case \"\$1\" in
+case "\$1" in
   start)
     mkdir -p /run/sshd
     /usr/sbin/sshd -D &
@@ -448,11 +611,15 @@ case \"\$1\" in
     killall sshd 2>/dev/null
     ;;
   *)
-    echo \"Usage: \$0 {start|stop}\"
+    echo "Usage: \$0 {start|stop}"
     ;;
 esac
-INITEOF
-chmod +x $mount_dir/etc/init.d/ssh-start" 2>/dev/null || true
+SSHEOF
+chmod +x $mount_dir/etc/init.d/sshd-boot" 2>/dev/null || true
+
+    # Enable init script
+    sudo mkdir -p "$mount_dir/etc/rc2.d" 2>/dev/null || true
+    sudo ln -sf ../init.d/sshd-boot "$mount_dir/etc/rc2.d/S01sshd" 2>/dev/null || true
 
     # Cleanup
     sudo umount "$mount_dir" 2>/dev/null || true
@@ -889,27 +1056,43 @@ fix_vm_issues() {
         (( issues++ )) || true
     fi
 
-    # Check 2: Rootfs exists
+    # Check 2: Rootfs exists — auto-rebuild
     if [[ ! -f "$ROOTFS_PATH" ]] && [[ ! -f "$VM_DIR/$vm_name/rootfs.ext4" ]]; then
-        print_status "WARN" "⚠️  Rootfs missing"
-        read -p "$(print_status "INPUT" "🔄 Rebuild rootfs? (y/N): ")" rebuild
-        if [[ "$rebuild" =~ ^[Yy]$ ]]; then
-            ROOTFS_PATH=$(setup_rootfs "$OS_TYPE") || true
-            (( issues++ )) || true
-        fi
+        print_status "INFO" "🔧 Rootfs missing — rebuilding automatically..."
+        ROOTFS_PATH=$(setup_rootfs "$OS_TYPE") || true
+        (( issues++ )) || true
     fi
 
-    # Check 3: Kernel exists
+    # Check 3: Kernel exists — auto-rebuild
     if [[ ! -f "$KERNEL_PATH" ]]; then
-        print_status "WARN" "⚠️  Kernel missing"
+        print_status "INFO" "🔧 Kernel missing — rebuilding automatically..."
         KERNEL_PATH=$(get_kernel "$OS_TYPE") || true
         (( issues++ )) || true
     fi
 
-    # Check 4: lkvm binary
+    # Check 4: lkvm binary — auto-build
     if [[ ! -x "$LKVM_BIN" ]]; then
-        print_status "WARN" "⚠️  lkvm binary missing"
+        print_status "INFO" "🔧 lkvm binary missing — building automatically..."
         build_kvmtool
+        (( issues++ )) || true
+    fi
+
+    # Check 5: Dependencies — auto-install
+    if ! command -v mkfs.ext4 &>/dev/null; then
+        print_status "INFO" "🔧 Installing e2fsprogs automatically..."
+        pkg_install e2fsprogs 2>/dev/null || true
+        (( issues++ )) || true
+    fi
+
+    if ! command -v debootstrap &>/dev/null; then
+        print_status "INFO" "🔧 Installing debootstrap automatically..."
+        pkg_install debootstrap 2>/dev/null || true
+        (( issues++ )) || true
+    fi
+
+    if ! command -v openssl &>/dev/null; then
+        print_status "INFO" "🔧 Installing openssl automatically..."
+        pkg_install openssl 2>/dev/null || true
         (( issues++ )) || true
     fi
 
