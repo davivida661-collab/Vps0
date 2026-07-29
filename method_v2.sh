@@ -277,23 +277,49 @@ setup_vm_image() {
         return 0
     fi
 
-    # Connectivity test
-    if ! curl -Is --connect-timeout 5 "https://${REGISTRY_URL%%/*}" >/dev/null; then
-        print_status "WARN" "⚠️  Registry ${REGISTRY_URL} seems unreachable."
+    print_status "INFO" "🔍 Diagnosing network..."
+    local net_error=0
+    
+    # DNS Test
+    if ! host "${REGISTRY_URL%%/*}" &>/dev/null && ! getent hosts "${REGISTRY_URL%%/*}" &>/dev/null; then
+        print_status "ERROR" "❌ DNS Failure: Cannot resolve ${REGISTRY_URL%%/*}"
+        net_error=1
+    fi
+    
+    # HTTP Test
+    if ! curl -Is --connect-timeout 5 "https://${REGISTRY_URL%%/*}" >/dev/null 2>&1; then
+        print_status "ERROR" "❌ Connection Failure: Cannot reach https://${REGISTRY_URL%%/*}"
+        net_error=1
+    fi
+
+    if [ $net_error -eq 1 ]; then
+        print_status "WARN" "⚠️  Your environment (CoCalc) might have restricted internet access."
+        print_status "INFO" "💡 Alternative: Download the image manually as a .tar file and use the Import option."
+        return 1
     fi
 
     print_status "INFO" "📥 Downloading $image..."
-    if podman pull "$image"; then
-        return 0
-    fi
+    local pull_out
+    pull_out=$(podman pull "$image" 2>&1) || {
+        print_status "INFO" "🔄 Pull failed, retrying with --tls-verify=false..."
+        pull_out=$(podman pull --tls-verify=false "$image" 2>&1) || {
+            print_status "ERROR" "❌ Podman Pull Error:"
+            echo "$pull_out" | sed 's/^/   /'
+            return 1
+        }
+    }
+    return 0
+}
 
-    print_status "INFO" "🔄 Pull failed, retrying with --tls-verify=false..."
-    if podman pull --tls-verify=false "$image"; then
-        return 0
+import_image_manual() {
+    print_status "INFO" "📥 Manual Image Import..."
+    read -rp "$(print_status "INPUT" "📄 Path to image .tar file: ")" tar_path
+    if [ ! -f "$tar_path" ]; then
+        print_status "ERROR" "❌ File not found: $tar_path"
+        return 1
     fi
-
-    print_status "ERROR" "❌ Failed to get image. Check your internet connection."
-    return 1
+    print_status "INFO" "📦 Loading image into Podman..."
+    podman load -i "$tar_path" && print_status "SUCCESS" "✅ Image imported!" || print_status "ERROR" "❌ Import failed."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -403,6 +429,7 @@ main_menu() {
         local vms=($(get_vm_list))
         echo "📋 Menu:"
         echo "  1) 🆕 Create VM"
+        echo "  i) 📥 Import Image (.tar)"
         [ ${#vms[@]} -gt 0 ] && {
             echo "  2) 🚀 Start VM"
             echo "  3) 🛑 Stop VM"
@@ -413,6 +440,7 @@ main_menu() {
         read -rp "🎯 Choice: " choice
         case "$choice" in
             1) create_new_vm ;;
+            i|I) import_image_manual ;;
             2) read -rp "Name: " n; start_vm "$n" ;;
             3) read -rp "Name: " n; stop_vm "$n" ;;
             4) read -rp "Name: " n; delete_vm "$n" ;;
