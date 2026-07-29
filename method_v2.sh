@@ -639,6 +639,9 @@ create_new_vm() {
     done
 
     # GUI Mode
+    if [[ -z "${DISPLAY:-}" ]] || [[ ! -e /dev/dri/renderD128 && ! -e /dev/dri/card0 ]]; then
+        print_status "WARN" "No display/GPU detected in this environment (e.g. container or headless sandbox) — GUI mode will likely fail. Console mode is recommended."
+    fi
     while true; do
         read -rp "$(print_status "INPUT" "Enable GUI mode? (y/n, default: n): ")" gui_input
         gui_input="${gui_input:-n}"
@@ -769,8 +772,13 @@ start_vm() {
     fi
 
     if [[ "$GUI_MODE" == true ]]; then
-        qemu_cmd+=(-vga virtio -display gtk,gl=on)
-        print_status "INFO" "Starting in GUI mode..."
+        if [[ -n "${DISPLAY:-}" ]] && [[ -e /dev/dri/renderD128 || -e /dev/dri/card0 ]]; then
+            qemu_cmd+=(-vga virtio -display gtk,gl=on)
+            print_status "INFO" "Starting in GUI mode (GL acceleration)..."
+        else
+            qemu_cmd+=(-vga virtio -display gtk,gl=off)
+            print_status "WARN" "No GPU/display with OpenGL support detected — starting GUI without GL acceleration..."
+        fi
     else
         qemu_cmd+=(-nographic -serial mon:stdio)
         print_status "INFO" "Starting in console mode — press Ctrl+A then X to exit QEMU"
