@@ -260,6 +260,21 @@ install_all_dependencies() {
 check_podman() {
     install_all_dependencies
 
+    # Ensure registries are configured (fix for many minimal distros)
+    if [ ! -f /etc/containers/registries.conf ] && [ ! -f "$HOME/.config/containers/registries.conf" ]; then
+        print_status "INFO" "🔧 Configuring Podman registries..."
+        mkdir -p "$HOME/.config/containers"
+        cat > "$HOME/.config/containers/registries.conf" << EOF
+unqualified-search-registries = ["docker.io", "quay.io"]
+
+[[registry]]
+location = "docker.io"
+
+[[registry]]
+location = "quay.io"
+EOF
+    fi
+
     # Verify podman works
     if ! podman info &>/dev/null 2>&1; then
         print_status "WARN" "⚠️  Podman not responding, trying to fix..."
@@ -413,9 +428,17 @@ setup_vm_image() {
 
     for variant in "${image_variants[@]}"; do
         print_status "INFO" "📥 Trying: $variant..."
+        
+        # Try with --tls-verify=false if standard pull fails (common in some restricted networks)
         local pull_output
         pull_output=$(podman pull "$variant" 2>&1)
         local pull_exit=$?
+        
+        if [ $pull_exit -ne 0 ]; then
+            print_status "INFO" "🔄 Pull failed, retrying with --tls-verify=false..."
+            pull_output=$(podman pull --tls-verify=false "$variant" 2>&1)
+            pull_exit=$?
+        fi
 
         if [ $pull_exit -eq 0 ]; then
             # Tag to requested name if different
