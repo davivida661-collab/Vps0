@@ -418,20 +418,45 @@ setup_vm_image() {
     else
         print_status "INFO" "Downloading image from $IMG_URL ..."
         local tmp_dl="${IMG_FILE}.downloading"
+        local max_attempts=3
+        local attempt=1
+        local download_ok=false
 
-        if [[ "$DOWNLOADER" == "wget" ]]; then
-            if ! wget --show-progress -q "$IMG_URL" -O "$tmp_dl"; then
-                rm -f "$tmp_dl"
-                print_status "ERROR" "Failed to download image from $IMG_URL"
-                exit 1
+        while (( attempt <= max_attempts )); do
+            if (( attempt > 1 )); then
+                print_status "WARN" "Retry $((attempt - 1))/$((max_attempts - 1)) — waiting $((attempt * 3))s before retrying..."
+                sleep $((attempt * 3))
             fi
-        else
-            if ! curl -L --progress-bar "$IMG_URL" -o "$tmp_dl"; then
-                rm -f "$tmp_dl"
-                print_status "ERROR" "Failed to download image from $IMG_URL"
-                exit 1
+
+            if [[ "$DOWNLOADER" == "wget" ]]; then
+                if wget --show-progress -q --tries=1 --timeout=30 "$IMG_URL" -O "$tmp_dl"; then
+                    download_ok=true
+                    break
+                fi
+            else
+                if curl -L --progress-bar --connect-timeout 30 --retry 0 "$IMG_URL" -o "$tmp_dl"; then
+                    download_ok=true
+                    break
+                fi
             fi
+
+            rm -f "$tmp_dl"
+            attempt=$((attempt + 1))
+        done
+
+        if [[ "$download_ok" != true ]]; then
+            print_status "ERROR" "Failed to download image after $max_attempts attempt(s): $IMG_URL"
+            print_status "INFO"  "Checking basic connectivity to the host..."
+            local url_host
+            url_host=$(echo "$IMG_URL" | awk -F/ '{print $3}')
+            if command -v curl &>/dev/null && curl -sSI --connect-timeout 10 "https://${url_host}" &>/dev/null; then
+                print_status "INFO" "Host ${url_host} is reachable — the image URL itself may be missing/moved (404), or the specific path changed."
+            else
+                print_status "WARN" "Could not reach ${url_host} — this looks like a network/DNS/firewall restriction in this environment, not a script bug."
+            fi
+            exit 1
         fi
+
         mv "$tmp_dl" "$IMG_FILE"
         print_status "SUCCESS" "Download complete."
     fi
@@ -1286,7 +1311,6 @@ mkdir -p "$VM_DIR"
 declare -A OS_OPTIONS=(
     ["Ubuntu 22.04 LTS"]="ubuntu|jammy|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22|ubuntu|ubuntu"
     ["Ubuntu 24.04 LTS"]="ubuntu|noble|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24|ubuntu|ubuntu"
-    ["Ubuntu 24.10"]="ubuntu|oracular|https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img|ubuntu2410|ubuntu|ubuntu"
     ["Debian 11 (Bullseye)"]="debian|bullseye|https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2|debian11|debian|debian"
     ["Debian 12 (Bookworm)"]="debian|bookworm|https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2|debian12|debian|debian"
     ["Debian 13 (Trixie)"]="debian|trixie|https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-generic-amd64-daily.qcow2|debian13|debian|debian"
