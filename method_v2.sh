@@ -356,10 +356,11 @@ setup_vm_image() {
     local hashed_pass
     if command -v openssl &>/dev/null; then
         hashed_pass=$(openssl passwd -6 "$PASSWORD" 2>/dev/null)
-    elif command -v python3 &>/dev/null; then
-        hashed_pass=$(python3 -c "import crypt,getpass; print(crypt.crypt('$PASSWORD', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null)
-    else
-        print_status "WARN" "openssl and python3 unavailable — storing password as plain text (insecure!)"
+    elif command -v python3 &>/dev/null && python3 -c "import crypt" &>/dev/null; then
+        hashed_pass=$(python3 -c "import crypt; print(crypt.crypt('$PASSWORD', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null)
+    fi
+    if [[ -z "${hashed_pass:-}" ]]; then
+        print_status "WARN" "No working password-hashing method available — storing password as plain text (insecure!)"
         hashed_pass="$PASSWORD"
     fi
 
@@ -1099,12 +1100,12 @@ main_menu() {
         pick_vm() {
             local action=$1
             local vm_num
-            read -rp "$(print_status "INPUT" "Enter VM number to $action: ")" vm_num
+            read -rp "$(print_status "INPUT" "Enter VM number to $action: ")" vm_num >&2
             if [[ "$vm_num" =~ ^[0-9]+$ ]] && (( vm_num >= 1 && vm_num <= vm_count )); then
                 echo $(( vm_num - 1 ))
                 return 0
             else
-                print_status "ERROR" "Invalid selection"
+                print_status "ERROR" "Invalid selection" >&2
                 return 1
             fi
         }
