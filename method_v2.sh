@@ -193,6 +193,55 @@ install_docker() {
     print_status "SUCCESS" "✅ Docker installed successfully!"
 }
 
+is_inside_container() {
+    # Detect if we're running inside a container
+    [[ -f /.dockerenv ]] && return 0
+    [[ -f /run/.containerenv ]] && return 0
+    grep -q "docker\|lxc\|kubepods" /proc/1/cgroup 2>/dev/null && return 0
+    return 1
+}
+
+start_docker_daemon() {
+    # Try multiple methods to start dockerd
+    local methods=(
+        "systemctl"
+        "service"
+        "dockerd-overlay2"
+        "dockerd-vfs"
+        "dockerd-container"
+    )
+
+    for method in "${methods[@]}"; do
+        case "$method" in
+            systemctl)
+                sudo systemctl start docker 2>/dev/null && sleep 2 && docker info &>/dev/null 2>&1 && return 0
+                ;;
+            service)
+                sudo service docker start 2>/dev/null && sleep 2 && docker info &>/dev/null 2>&1 && return 0
+                ;;
+            dockerd-overlay2)
+                # Standard dockerd with overlay2
+                nohup dockerd --storage-driver=overlay2 --iptables=false &>/tmp/dockerd.log &
+                sleep 8
+                docker info &>/dev/null 2>&1 && return 0
+                ;;
+            dockerd-vfs)
+                # VFS driver (works in more environments)
+                nohup dockerd --storage-driver=vfs --iptables=false &>/tmp/dockerd-vfs.log &
+                sleep 10
+                docker info &>/dev/null 2>&1 && return 0
+                ;;
+            dockerd-container)
+                # Minimal dockerd for containers (DinD)
+                nohup dockerd --storage-driver=vfs --iptables=false --bridge=none --default-ulimit nofile=1024:4096 &>/tmp/dockerd-dind.log &
+                sleep 12
+                docker info &>/dev/null 2>&1 && return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
 check_docker() {
     if ! command -v docker &>/dev/null; then
         install_docker
@@ -202,47 +251,30 @@ check_docker() {
     if ! docker info &>/dev/null 2>&1; then
         print_status "WARN" "⚠️  Docker daemon is not running. Attempting to start..."
 
-        # Method 1: systemctl
-        sudo systemctl start docker 2>/dev/null && print_status "INFO" "📋 Started via systemctl" && sleep 2 && true
-
-        # Method 2: service command
-        if ! docker info &>/dev/null 2>&1; then
-            sudo service docker start 2>/dev/null && print_status "INFO" "📋 Started via service" && sleep 2 && true
+        # Detect environment
+        if is_inside_container; then
+            print_status "INFO" "🐳 Detected: running inside a container (DinD mode)"
         fi
 
-        # Method 3: dockerd in background (for containers/no-systemd)
-        if ! docker info &>/dev/null 2>&1; then
-            print_status "INFO" "📋 Trying dockerd directly..."
-            sudo nohup dockerd --storage-driver=overlay2 &>/tmp/dockerd.log &
-            DOCKERD_PID=$!
-            sleep 5
-            if ! docker info &>/dev/null 2>&1; then
-                sleep 5
-            fi
-            if docker info &>/dev/null 2>&1; then
-                print_status "INFO" "📋 dockerd started (PID: $DOCKERD_PID)"
-            else
-                # Method 4: try without overlay2
-                sudo nohup dockerd --storage-driver=vfs &>/tmp/dockerd-vfs.log &
-                sleep 8
-            fi
-        fi
+        start_docker_daemon
 
-        # Final check
         if ! docker info &>/dev/null 2>&1; then
             print_status "ERROR" "❌ Docker daemon failed to start."
             print_status "INFO"  "💡 Possible causes:"
-            print_status "INFO"  "   1. Running inside a container without privileged mode"
+            print_status "INFO"  "   1. Running inside a container without --privileged flag"
             print_status "INFO"  "   2. No root/sudo access"
-            print_status "INFO"  "   3. Docker is already running but socket is broken"
+            print_status "INFO"  "   3. AppArmor/SELinux blocking dockerd"
             echo
-            print_status "INFO"  "💡 Try these commands manually:"
-            print_status "INFO"  "   sudo dockerd &"
-            print_status "INFO"  "   sudo systemctl start docker"
-            print_status "INFO"  "   sudo service docker start"
+            print_status "INFO"  "💡 Try manually:"
+            print_status "INFO"  "   sudo dockerd --storage-driver=vfs --iptables=false &"
             echo
-            print_status "INFO"  "📋 Checking Docker logs:"
-            sudo cat /tmp/dockerd.log 2>/dev/null | tail -5 || true
+            print_status "INFO"  "📋 Docker logs:"
+            sudo cat /tmp/dockerd*.log 2>/dev/null | tail -10 || true
+            echo
+            print_status "INFO"  "📋 System info:"
+            echo "    Container: $(is_inside_container && echo yes || echo no)"
+            echo "    User: $(whoami)"
+            echo "    Kernel: $(uname -r)"
             exit 1
         fi
     fi
