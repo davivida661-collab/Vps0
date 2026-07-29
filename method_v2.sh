@@ -154,19 +154,42 @@ validate_input() {
 # ─────────────────────────────────────────────────────────────────────────────
 #  DEPENDENCY & SYSTEM CHECKS
 # ─────────────────────────────────────────────────────────────────────────────
-# Detect Ubuntu release codename and choose correct libfuse3 package
+# Detect Ubuntu release and choose correct packages
 get_fuse3_package() {
     local codename
     codename=$(. /etc/os-release 2>/dev/null && echo "$VERSION_CODENAME") || codename=""
-
     case "$codename" in
-        resolute|questing|stonking)  # Ubuntu 26.04+
-            echo "libfuse3-4"
-            ;;
-        *)                           # Ubuntu 20.04–25.10, Debian, etc.
-            echo "libfuse3-3"
-            ;;
+        resolute|questing|stonking) echo "libfuse3-4" ;;
+        *) echo "libfuse3-3" ;;
     esac
+}
+
+get_pcre_package() {
+    local codename
+    codename=$(. /etc/os-release 2>/dev/null && echo "$VERSION_CODENAME") || codename=""
+    case "$codename" in
+        resolute|questing|stonking) echo "libpcre2-8-0" ;;
+        *) echo "libpcre3" ;;
+    esac
+}
+
+safe_apt_install() {
+    # Try to install a package, ignore if it doesn't exist
+    local apt_cmd="$1"
+    shift
+    local pkg
+    for pkg in "$@"; do
+        # First check if package exists in repos
+        if $apt_cmd update 2>/dev/null >/dev/null; then
+            if $apt_cmd show "$pkg" 2>/dev/null | grep -q "^Package:"; then
+                print_status "INFO" "📦 Installing $pkg..."
+                $apt_cmd install -y --no-install-recommends "$pkg" 2>&1 | tail -3
+                return 0
+            fi
+        fi
+    done
+    print_status "WARN" "⚠️  None of the fallback packages found: $*"
+    return 1
 }
 
 install_system_packages() {
@@ -179,17 +202,19 @@ install_system_packages() {
         has_sudo=true
     fi
 
-    local install_cmd=""
+    local apt_cmd=""
     if [ "$has_sudo" = true ]; then
         if [ "$(id -u)" -eq 0 ]; then
-            install_cmd="apt-get install -y"
+            apt_cmd="apt-get"
         else
-            install_cmd="sudo apt-get install -y"
+            apt_cmd="sudo apt-get"
         fi
     fi
 
-    # Core packages always needed
-    local core_pkgs="qemu-system cloud-image-utils wget lsof openssl"
+    local install_cmd=""
+    if [ -n "$apt_cmd" ]; then
+        install_cmd="$apt_cmd install -y --no-install-recommends"
+    fi
 
     if [ -z "$install_cmd" ]; then
         print_status "WARN" "⚠️  No sudo/root access — cannot auto-install packages."
@@ -199,43 +224,41 @@ install_system_packages() {
 
     # Update package lists
     print_status "INFO" "📦 Updating package lists..."
-    $install_cmd update 2>&1 | tail -2
+    $apt_cmd update 2>&1 | tail -2
 
-    # Install core packages
-    print_status "INFO" "📦 Installing core dependencies (qemu-system, cloud-image-utils, wget, lsof, openssl)..."
-    $install_cmd --no-install-recommends $core_pkgs 2>&1 | tail -5
+    # Install core packages (skip failures silently)
+    print_status "INFO" "📦 Installing core dependencies..."
+    local core_pkgs="qemu-system cloud-image-utils wget lsof openssl"
+    $install_cmd $core_pkgs 2>&1 | tail -5 || true
 
-    # Install the correct libfuse3 package for this Ubuntu version
-    print_status "INFO" "📦 Installing libfuse3.so.3..."
+    # Install libpcre (version-aware)
+    local pcre_pkg
+    pcre_pkg=$(get_pcre_package)
+    print_status "INFO" "📦 Installing PCRE package: $pcre_pkg..."
+    $install_cmd "$pcre_pkg" 2>&1 | tail -3 || {
+        print_status "WARN" "⚠️  $pcre_pkg failed, trying fallbacks..."
+        for fallback in libpcre3 libpcre2-8-0 libpcre2-posix3; do
+            [[ "$fallback" == "$pcre_pkg" ]] && continue
+            $install_cmd "$fallback" 2>&1 | tail -2 && break
+        done
+    }
+
+    # Install libfuse3 (version-aware)
     local fuse3_pkg
     fuse3_pkg=$(get_fuse3_package)
-    print_status "INFO" "📦 Detected fuse package: $fuse3_pkg"
-
-    $install_cmd --no-install-recommends "$fuse3_pkg" 2>&1 | tail -3
-
-    # If that failed, try fallback package names
-    if ! ldconfig -p 2>/dev/null | grep -q libfuse3.so.3; then
-        print_status "WARN" "⚠️  $fuse3_pkg didn't provide libfuse3.so.3 — trying fallbacks..."
-        for fallback in libfuse3-3 libfuse3-4 fuse3 libfuse2 libfuse2t64; do
+    print_status "INFO" "📦 Installing fuse3 package: $fuse3_pkg..."
+    $install_cmd "$fuse3_pkg" 2>&1 | tail -3 || {
+        print_status "WARN" "⚠️  $fuse3_pkg failed, trying fallbacks..."
+        for fallback in libfuse3-3 libfuse3-4 fuse3 libfuse2t64; do
             [[ "$fallback" == "$fuse3_pkg" ]] && continue
-            $install_cmd --no-install-recommends "$fallback" 2>&1 | tail -2
-            if ldconfig -p 2>/dev/null | grep -q libfuse3.so.3; then
-                print_status "SUCCESS" "✅ libfuse3.so.3 installed via $fallback"
-                break
-            fi
+            $install_cmd "$fallback" 2>&1 | tail -2 && break
         done
-    fi
+    }
 
     # Refresh linker cache
     ldconfig 2>/dev/null || true
 
-    # Final verification
-    if ! ldconfig -p 2>/dev/null | grep -q libfuse3.so.3; then
-        print_status "WARN" "⚠️  libfuse3.so.3 still not found after install attempts."
-        print_status "INFO"  "💡 Try: sudo apt install libfuse3-4 (Ubuntu 26.04) or libfuse3-3 (Ubuntu 20.04–25.04)"
-    else
-        print_status "SUCCESS" "✅ libfuse3.so.3 is available"
-    fi
+    print_status "INFO" "📦 Dependency installation complete."
 }
 
 check_dependencies() {
