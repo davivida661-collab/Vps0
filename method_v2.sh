@@ -62,11 +62,11 @@ print_status() {
     local type="$1"
     local message="$2"
     case "$type" in
-        INFO)    echo -e "\033[1;34m📋 [INFO]\033[0m $message" ;;
-        WARN)    echo -e "\033[1;33m⚠️  [WARN]\033[0m $message" ;;
-        ERROR)   echo -e "\033[1;31m❌ [ERROR]\033[0m $message" ;;
-        SUCCESS) echo -e "\033[1;32m✅ [SUCCESS]\033[0m $message" ;;
-        INPUT)   echo -e "\033[1;36m🎯 [INPUT]\033[0m $message" ;;
+        INFO)    echo -e "033[1;34m📋 [INFO]033[0m $message" ;;
+        WARN)    echo -e "033[1;33m⚠️  [WARN]033[0m $message" ;;
+        ERROR)   echo -e "033[1;31m❌ [ERROR]033[0m $message" ;;
+        SUCCESS) echo -e "033[1;32m✅ [SUCCESS]033[0m $message" ;;
+        INPUT)   echo -e "033[1;36m🎯 [INPUT]033[0m $message" ;;
         *)       echo "[$type] $message" ;;
     esac
 }
@@ -213,7 +213,7 @@ install_all_dependencies() {
         if [[ -n "$podman_url" ]]; then
             curl -sL "$podman_url" -o /tmp/podman.tar.gz 2>/dev/null
             tar xzf /tmp/podman.tar.gz -C /tmp 2>/dev/null
-            sudo cp /tmp/podman /usr/local/bin/ 2>/dev/null || \
+            sudo cp /tmp/podman /usr/local/bin/ 2>/dev/null || 
             cp /tmp/podman "$HOME/.local/bin/" 2>/dev/null || true
             chmod +x "$HOME/.local/bin/podman" 2>/dev/null || true
             export PATH="$HOME/.local/bin:$PATH"
@@ -685,15 +685,15 @@ start_vm() {
     )
 
     # Run container (keep it alive with sleep or sshd)
-    podman run \
-        -d \
-        --name "$container_name" \
-        --hostname "$HOSTNAME" \
-        -p "$SSH_PORT:22" \
-        --memory "$MEMORY" \
-        --cpus "$CPUS" \
-        --restart unless-stopped \
-        "$IMAGE_NAME" \
+    podman run 
+        -d 
+        --name "$container_name" 
+        --hostname "$HOSTNAME" 
+        -p "$SSH_PORT:22" 
+        --memory "$MEMORY" 
+        --cpus "$CPUS" 
+        --restart unless-stopped 
+        "$IMAGE_NAME" 
         bash -c "$setup_script" 2>&1 | tail -1 || true
 
     # Wait for container to start
@@ -1094,7 +1094,7 @@ snapshot_list() {
             local sname screated
             sname=$(grep "^name=" "$meta" | cut -d= -f2)
             screated=$(grep "^created=" "$meta" | cut -d= -f2-)
-            printf "  📸 %-20s Created: %s\n" "$sname" "$screated"
+            printf "  📸 %-20s Created: %sn" "$sname" "$screated"
         done
     fi
     echo "═══════════════════════════════════════════════"
@@ -1118,7 +1118,7 @@ snapshot_revert() {
         sname=$(grep "^name=" "$meta" | cut -d= -f2)
         snap_names+=("$sname")
         (( idx++ )) || true
-        printf "  %d) %s\n" "$idx" "$sname"
+        printf "  %d) %sn" "$idx" "$sname"
     done
 
     read -rp "$(print_status "INPUT" "🎯 Select snapshot number: ")" sel
@@ -1154,14 +1154,14 @@ snapshot_revert() {
             get_ssh_setup_script > "$setup_script"
             chmod +x "$setup_script"
 
-            podman run -d \
-                --name "$container_name" \
-                --hostname "$HOSTNAME" \
-                -p "$SSH_PORT:22" \
-                --memory "$MEMORY" \
-                --cpus "$CPUS" \
-                --restart unless-stopped \
-                "$snap_image" \
+            podman run -d 
+                --name "$container_name" 
+                --hostname "$HOSTNAME" 
+                -p "$SSH_PORT:22" 
+                --memory "$MEMORY" 
+                --cpus "$CPUS" 
+                --restart unless-stopped 
+                "$snap_image" 
                 bash -c "$setup_script" 2>&1 | tail -1 || true
 
             sleep 3
@@ -1194,7 +1194,7 @@ snapshot_delete() {
         sname=$(grep "^name=" "$meta" | cut -d= -f2)
         snap_names+=("$sname")
         (( idx++ )) || true
-        printf "  %d) %s\n" "$idx" "$sname"
+        printf "  %d) %sn" "$idx" "$sname"
     done
 
     read -rp "$(print_status "INPUT" "🎯 Select snapshot to delete: ")" sel
@@ -1273,7 +1273,7 @@ restore_vm() {
         local fname fsize
         fname=$(basename "$bf")
         fsize=$(du -h "$bf" | cut -f1)
-        printf "  %d) %s (%s)\n" "$idx" "$fname" "$fsize"
+        printf "  %d) %s (%s)n" "$idx" "$fname" "$fsize"
     done
 
     read -rp "$(print_status "INPUT" "🎯 Select backup: ")" sel
@@ -1317,7 +1317,7 @@ start_autostart_vms() {
             fi
         fi
     done
-    [[ $started -gt 0 ]] && print_status "SUCCESS" "✅ Started $started autostart VM(s)" || \
+    [[ $started -gt 0 ]] && print_status "SUCCESS" "✅ Started $started autostart VM(s)" || 
         print_status "INFO" "ℹ️  No autostart VMs configured"
 }
 
@@ -1336,7 +1336,7 @@ list_all_vms() {
         for i in "${!vms[@]}"; do
             local status="💤"
             is_vm_running "${vms[$i]}" && status="🚀"
-            printf "  %2d) %-20s %s\n" $((i+1)) "${vms[$i]}" "$status"
+            printf "  %2d) %-20s %sn" $((i+1)) "${vms[$i]}" "$status"
         done
     fi
 
@@ -1344,7 +1344,7 @@ list_all_vms() {
     echo "═══════════════════════════════════════════════"
     echo "  Podman containers:"
     echo "───────────────────────────────────────────────"
-    podman ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | grep -E "vm-|^NAMES" || echo "  (none)"
+    podman ps -a --format "table {{.Names}}t{{.Status}}t{{.Ports}}" 2>/dev/null | grep -E "vm-|^NAMES" || echo "  (none)"
     echo "═══════════════════════════════════════════════"
 }
 
@@ -1363,7 +1363,7 @@ main_menu() {
             for i in "${!vms[@]}"; do
                 local status="💤"
                 is_vm_running "${vms[$i]}" && status="🚀"
-                printf "  %2d) %-20s %s\n" $((i+1)) "${vms[$i]}" "$status"
+                printf "  %2d) %-20s %sn" $((i+1)) "${vms[$i]}" "$status"
             done
             echo
         fi
@@ -1491,7 +1491,7 @@ run_cli() {
         info)     [[ -n "${1:-}" ]] && show_vm_info "$1" || { print_status "ERROR" "Usage: $SCRIPT_NAME info <vm_name>"; return 1; } ;;
         delete)   [[ -n "${1:-}" ]] && delete_vm "$1" || { print_status "ERROR" "Usage: $SCRIPT_NAME delete <vm_name>"; return 1; } ;;
         edit)     [[ -n "${1:-}" ]] && edit_vm_config "$1" || { print_status "ERROR" "Usage: $SCRIPT_NAME edit <vm_name>"; return 1; } ;;
-        list)     local vms=($(get_vm_list)); printf '%s\n' "${vms[@]}" ;;
+        list)     local vms=($(get_vm_list)); printf '%sn' "${vms[@]}" ;;
         autostart) start_autostart_vms ;;
         *)
             print_status "ERROR" "❌ Unknown command: $cmd"
@@ -1549,8 +1549,8 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo "  - Multi-OS: Ubuntu, Debian, Alpine, CentOS, Fedora, Arch"
     echo ""
     echo "Environment:"
-    echo "  VM_DIR                    Directory for VM files (default: \$HOME/vms)"
-    echo "  DATA_DIR                  Directory for data (default: \$HOME/.vms-data)"
+    echo "  VM_DIR                    Directory for VM files (default: $HOME/vms)"
+    echo "  DATA_DIR                  Directory for data (default: $HOME/.vms-data)"
     echo "  VM_LOG_FILE               Log file path"
     exit 0
 fi
